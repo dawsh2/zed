@@ -114,6 +114,7 @@ use std::{
     borrow::BorrowMut,
     future::Future,
     sync::{Arc, LazyLock, atomic::AtomicUsize},
+    time::Instant,
 };
 use taffy::TaffyLayoutEngine;
 
@@ -326,6 +327,8 @@ pub struct FrameTimings {
     pub frame_time: f64,
     /// A
     pub timings: HashMap<&'static core::panic::Location<'static>, f64>,
+    /// A
+    pub end_time: Option<Instant>,
 }
 
 /// TESTING
@@ -336,6 +339,7 @@ pub(crate) static FRAME_BUF: LazyLock<[Arc<Mutex<FrameTimings>>; FRAME_RING]> =
             Arc::new(Mutex::new(FrameTimings {
                 frame_time: 0.0,
                 timings: HashMap::default(),
+                end_time: None,
             }))
         })
     });

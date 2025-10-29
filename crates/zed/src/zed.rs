@@ -681,7 +681,7 @@ impl TimingsPanel {
                     .min_w(px(60.0))
                     .flex_shrink_0()
                     .text_right()
-                    .child(format!("{:.1}", fill_width)),
+                    .child(format!("{:.1} {}", fill_width, item.value)),
             )
     }
 }
@@ -810,8 +810,11 @@ impl Panel for TimingsPanel {
 impl Render for TimingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
+            .id("timings")
             .w_full()
+            .h_full()
             .gap_2()
+            .overflow_scroll()
             .child(
                 Button::new(
                     "switch-mode",

@@ -800,19 +800,22 @@ impl WindowsPlatformInner {
 pub(crate) fn drain_main_receiver(main_receiver: &flume::Receiver<Runnable<Bigus>>) {
     let mut timings = HashMap::default();
 
+    let frame_buf = {
+        let index = FRAME_INDEX.load(std::sync::atomic::Ordering::Acquire) % FRAME_RING;
+        FRAME_BUF[index].clone()
+    };
+
+    let end_time = frame_buf.lock().end_time;
+
     for runnable in main_receiver.drain() {
         let name = runnable.metadata().location;
         let start = Instant::now();
         runnable.run();
         let end = Instant::now();
+
         *timings.entry(name).or_insert(0f64) += end.duration_since(start).as_secs_f64();
     }
 
-    let frame_buf = {
-        let index = FRAME_INDEX.load(std::sync::atomic::Ordering::Acquire) % FRAME_RING;
-        let mut frame_buf = &*FRAME_BUF;
-        frame_buf[index].clone()
-    };
     let mut frame_buf = frame_buf.lock();
     frame_buf.timings.extend(timings);
 }

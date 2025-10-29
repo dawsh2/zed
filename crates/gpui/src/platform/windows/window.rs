@@ -74,6 +74,7 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) validation_number: usize,
     pub(crate) main_receiver: flume::Receiver<Runnable<Bigus>>,
     pub(crate) platform_window_handle: HWND,
+    pub(crate) frame_start: RefCell<Instant>,
 }
 
 impl WindowsWindowState {
@@ -232,6 +233,7 @@ impl WindowsWindowInner {
             main_receiver: context.main_receiver.clone(),
             platform_window_handle: context.platform_window_handle,
             system_settings: RefCell::new(WindowsSystemSettings::new(context.display)),
+            frame_start: RefCell::new(Instant::now()),
         }))
     }
 
