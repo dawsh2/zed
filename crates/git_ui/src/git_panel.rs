@@ -1223,14 +1223,18 @@ impl GitPanel {
         });
     }
 
-    pub fn stage_all(&mut self, _: &StageAll, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn change_all_files_stage(&mut self, stage: bool, cx: &mut Context<Self>) {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
         let op_id = self.pending.iter().map(|p| p.op_id).max().unwrap_or(0) + 1;
         self.pending.push(PendingOperation {
             op_id,
-            target_status: TargetStatus::Staged,
+            target_status: if stage {
+                TargetStatus::Staged
+            } else {
+                TargetStatus::Unstaged
+            },
             entries: PendingEntries::All,
             finished: false,
         });
@@ -1241,7 +1245,15 @@ impl GitPanel {
         cx.spawn({
             async move |this, cx| {
                 let result = cx
-                    .update(|cx| active_repository.update(cx, |repo, cx| repo.stage_all(cx)))?
+                    .update(|cx| {
+                        active_repository.update(cx, |repo, cx| {
+                            if stage {
+                                repo.stage_all(cx)
+                            } else {
+                                repo.unstage_all(cx)
+                            }
+                        })
+                    })?
                     .await;
 
                 this.update(cx, |this, cx| {
@@ -1252,7 +1264,7 @@ impl GitPanel {
                     }
                     result
                         .map_err(|e| {
-                            this.show_error_toast("add", e, cx);
+                            this.show_error_toast(if stage { "add" } else { "reset" }, e, cx);
                         })
                         .ok();
                     cx.notify();
@@ -1262,16 +1274,12 @@ impl GitPanel {
         .detach();
     }
 
+    pub fn stage_all(&mut self, _: &StageAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.change_all_files_stage(true, cx);
+    }
+
     pub fn unstage_all(&mut self, _: &UnstageAll, _window: &mut Window, cx: &mut Context<Self>) {
-        let entries = self
-            .entries
-            .iter()
-            .filter_map(|entry| entry.status_entry())
-            .filter(|status_entry| status_entry.staging.has_staged())
-            .cloned()
-            .collect::<Vec<_>>();
-        dbg!(&entries);
-        self.change_file_stage(false, entries, cx);
+        self.change_all_files_stage(false, cx);
     }
 
     fn toggle_staged_for_entry(

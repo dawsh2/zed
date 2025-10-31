@@ -338,7 +338,7 @@ pub struct GitJob {
 
 #[derive(Debug, PartialEq, Eq)]
 enum GitJobKey {
-    WriteIndex(RepoPath),
+    WriteIndex(String),
     ReloadBufferDiffBases,
     RefreshStatuses,
     ReloadGitState,
@@ -3754,12 +3754,13 @@ impl Repository {
 
         let id = self.id;
         let save_tasks = self.save_buffers(&entries, cx);
-        let job_key = match entries.len() {
-            1 => Some(GitJobKey::WriteIndex(entries[0].clone())),
-            _ => None,
-        };
-        let paths: Vec<_> = entries.iter().map(|p| p.as_unix_str()).collect();
-        let status = format!("git add {}", paths.join(" "));
+        let paths = entries
+            .iter()
+            .map(|p| p.as_unix_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let status = format!("git add {paths}");
+        let job_key = GitJobKey::WriteIndex(paths);
 
         cx.spawn(async move |this, cx| {
             for save_task in save_tasks {
@@ -3768,7 +3769,7 @@ impl Repository {
 
             this.update(cx, |this, _| {
                 this.send_keyed_job(
-                    job_key,
+                    Some(job_key),
                     Some(status.into()),
                     move |git_repo, _cx| async move {
                         match git_repo {
@@ -3813,12 +3814,13 @@ impl Repository {
 
         let id = self.id;
         let save_tasks = self.save_buffers(&entries, cx);
-        let job_key = match entries.len() {
-            1 => Some(GitJobKey::WriteIndex(entries[0].clone())),
-            _ => None,
-        };
-        let paths: Vec<_> = entries.iter().map(|p| p.as_unix_str()).collect();
-        let status = format!("git reset {}", paths.join(" "));
+        let paths = entries
+            .iter()
+            .map(|p| p.as_unix_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let status = format!("git reset {paths}");
+        let job_key = GitJobKey::WriteIndex(paths);
 
         cx.spawn(async move |this, cx| {
             for save_task in save_tasks {
@@ -3827,7 +3829,7 @@ impl Repository {
 
             this.update(cx, |this, _| {
                 this.send_keyed_job(
-                    job_key,
+                    Some(job_key),
                     Some(status.into()),
                     move |git_repo, _cx| async move {
                         match git_repo {
@@ -3867,17 +3869,15 @@ impl Repository {
             .filter(|entry| !entry.status.staging().is_fully_staged())
             .map(|entry| entry.repo_path)
             .collect();
-        dbg!(&to_stage);
         self.stage_entries(to_stage, cx)
     }
 
     pub fn unstage_all(&self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
         let to_unstage = self
             .cached_status()
-            .filter(|entry| entry.status.staging().has_staged())
+            .filter(|entry| entry.status.staging().is_fully_unstaged())
             .map(|entry| entry.repo_path)
             .collect();
-        dbg!(&to_unstage);
         self.unstage_entries(to_unstage, cx)
     }
 
@@ -4303,7 +4303,7 @@ impl Repository {
         let this = cx.weak_entity();
         let git_store = self.git_store.clone();
         self.send_keyed_job(
-            Some(GitJobKey::WriteIndex(path.clone())),
+            Some(GitJobKey::WriteIndex(path.as_unix_str().to_string())),
             None,
             move |git_repo, mut cx| async move {
                 log::debug!(
