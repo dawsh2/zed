@@ -1132,6 +1132,8 @@ pub struct Editor {
     expect_bounds_change: Option<Bounds<Pixels>>,
     tasks: BTreeMap<(BufferId, BufferRow), RunnableTasks>,
     tasks_update_task: Option<Task<()>>,
+    syntax_fold_ids: HashMap<BufferId, Vec<CreaseId>>,
+    syntax_folds_task: Option<Task<()>>,
     breakpoint_store: Option<Entity<BreakpointStore>>,
     gutter_breakpoint_indicator: (Option<PhantomBreakpointIndicator>, Option<Task<()>>),
     hovered_diff_hunk_row: Option<DisplayRow>,
@@ -2204,6 +2206,8 @@ impl Editor {
                 })
                 .unwrap_or_default(),
             tasks_update_task: None,
+            syntax_fold_ids: HashMap::default(),
+            syntax_folds_task: None,
             pull_diagnostics_task: Task::ready(()),
             colors: None,
             refresh_colors_task: Task::ready(()),
@@ -15585,6 +15589,96 @@ impl Editor {
                 .ok();
         })
     }
+
+    fn refresh_syntax_folds(
+        &mut self,
+        buffer_id: BufferId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let buffer = match self.buffer.read(cx).buffer(buffer_id) {
+            Some(buffer) => buffer,
+            None => return Task::ready(()),
+        };
+
+        let snapshot = buffer.read(cx).snapshot();
+
+        cx.spawn_in(window, async move |editor, cx| {
+            // Debounce to avoid excessive recomputation
+            cx.background_executor().timer(UPDATE_DEBOUNCE).await;
+
+            // Compute folds on background thread
+            let fold_ranges = cx
+                .background_executor()
+                .spawn(async move {
+                    use language::ToTreeSitterPoint;
+
+                    let range = 0..snapshot.len();
+                    let mut matches = snapshot.syntax.matches(range, &snapshot, |grammar| {
+                        grammar.folds_config.as_ref()?.query.as_ref()
+                    });
+
+                    let mut ranges = Vec::new();
+                    while let Some(mat) = matches.peek() {
+                        for capture in mat.captures {
+                            let node = capture.node;
+                            let start = language::Point::from_ts_point(node.start_position());
+                            let end = language::Point::from_ts_point(node.end_position());
+                            // Only include multi-line folds
+                            if start.row < end.row {
+                                ranges.push(start..end);
+                            }
+                        }
+                        matches.advance();
+                    }
+                    ranges
+                })
+                .await;
+
+            // Convert to Creases and insert on main thread
+            editor
+                .update(cx, |editor, cx| {
+                    let multibuffer = editor.buffer.read(cx);
+                    let snapshot = multibuffer.snapshot(cx);
+                    let placeholder = editor.display_map.read(cx).fold_placeholder.clone();
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+
+                    // Remove old syntax folds
+                    if let Some(old_ids) = editor.syntax_fold_ids.remove(&buffer_id) {
+                        editor.remove_creases(old_ids, cx);
+                    }
+
+                    // Create new creases
+                    let creases: Vec<_> = fold_ranges
+                        .into_iter()
+                        .filter_map(|range| {
+                            let start = buffer_snapshot.anchor_before(range.start);
+                            let end = buffer_snapshot.anchor_after(range.end);
+
+                            // Convert buffer anchors to multibuffer anchors
+                            let excerpts: Vec<_> = snapshot.excerpts().collect();
+                            for (excerpt_id, excerpt_snapshot, _) in excerpts {
+                                if excerpt_snapshot.remote_id() == buffer_snapshot.remote_id() {
+                                    let mb_start = snapshot.anchor_in_excerpt(excerpt_id, start)?;
+                                    let mb_end = snapshot.anchor_in_excerpt(excerpt_id, end)?;
+                                    return Some(Crease::simple(
+                                        mb_start..mb_end,
+                                        placeholder.clone(),
+                                    ));
+                                }
+                            }
+                            None
+                        })
+                        .collect();
+
+                    // Insert and track IDs
+                    let ids = editor.insert_creases(creases, cx);
+                    editor.syntax_fold_ids.insert(buffer_id, ids);
+                })
+                .ok();
+        })
+    }
+
     fn fetch_runnable_ranges(
         snapshot: &DisplaySnapshot,
         range: Range<Anchor>,
@@ -21033,6 +21127,7 @@ impl Editor {
             }
             multi_buffer::Event::Reparsed(buffer_id) => {
                 self.tasks_update_task = Some(self.refresh_runnables(window, cx));
+                self.syntax_folds_task = Some(self.refresh_syntax_folds(*buffer_id, window, cx));
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
 
                 cx.emit(EditorEvent::Reparsed(*buffer_id));

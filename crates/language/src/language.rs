@@ -1178,7 +1178,7 @@ pub struct Grammar {
     pub(crate) runnable_config: Option<RunnableConfig>,
     pub(crate) indents_config: Option<IndentConfig>,
     pub outline_config: Option<OutlineConfig>,
-    pub(crate) folds_config: Option<FoldsConfig>,
+    pub folds_config: Option<FoldsConfig>,
     pub text_object_config: Option<TextObjectConfig>,
     pub embedding_config: Option<EmbeddingConfig>,
     pub(crate) injection_config: Option<InjectionConfig>,
