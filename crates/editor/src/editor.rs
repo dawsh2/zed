@@ -1133,6 +1133,7 @@ pub struct Editor {
     tasks: BTreeMap<(BufferId, BufferRow), RunnableTasks>,
     tasks_update_task: Option<Task<()>>,
     syntax_fold_ids: HashMap<BufferId, Vec<CreaseId>>,
+    auto_folded_buffers: HashSet<BufferId>,
     syntax_folds_task: Option<Task<()>>,
     breakpoint_store: Option<Entity<BreakpointStore>>,
     gutter_breakpoint_indicator: (Option<PhantomBreakpointIndicator>, Option<Task<()>>),
@@ -2207,6 +2208,7 @@ impl Editor {
                 .unwrap_or_default(),
             tasks_update_task: None,
             syntax_fold_ids: HashMap::default(),
+            auto_folded_buffers: HashSet::default(),
             syntax_folds_task: None,
             pull_diagnostics_task: Task::ready(()),
             colors: None,
@@ -15643,28 +15645,18 @@ impl Editor {
                             //   - fold.auto: Auto-fold this pattern on file open (e.g., function bodies)
                             // Future predicates can be added here (e.g., fold.offsetEnd, fold.trim)
                             if let Some(language) = snapshot.language() {
-                                eprintln!("[FOLD DEBUG] Language: {:?}", language.name());
                                 if let Some(grammar) = language.grammar() {
-                                    eprintln!("[FOLD DEBUG] Grammar found");
                                     if let Some(query) = grammar.folds_config.as_ref().and_then(|cfg| cfg.query.as_ref()) {
-                                        eprintln!("[FOLD DEBUG] Folds query found, pattern_index: {}", pattern_index);
                                         let settings = query.property_settings(pattern_index);
-                                        eprintln!("[FOLD DEBUG] Property settings count: {}", settings.len());
                                         for setting in settings {
                                             let key_str = setting.key.as_ref();
-                                            eprintln!("[FOLD DEBUG] Setting key: {:?} (len={}, bytes={:?}), value: {:?}", setting.key, key_str.len(), key_str.as_bytes(), setting.value);
                                             if key_str == "fold.offsetStart" || key_str == "offsetStart" {
-                                                eprintln!("[FOLD DEBUG] Matched fold.offsetStart!");
                                                 if let Some(offset) = setting.value.as_ref().and_then(|v| v.parse::<u32>().ok()) {
-                                                    eprintln!("[FOLD DEBUG] Applying offset: {} (start was {:?})", offset, start);
                                                     start.row += offset;
                                                     start.column = 0;
-                                                    eprintln!("[FOLD DEBUG] Start is now: {:?}", start);
                                                 }
                                             } else if key_str == "fold.auto" || key_str == "auto" {
-                                                eprintln!("[FOLD DEBUG] Matched fold.auto!");
                                                 if setting.value.as_ref().map_or(false, |v| v.as_ref() == "true") {
-                                                    eprintln!("[FOLD DEBUG] Auto-fold enabled for this pattern");
                                                     should_auto_fold = true;
                                                 }
                                             }
@@ -15676,7 +15668,6 @@ impl Editor {
 
                             // Only include multi-line folds
                             if start.row < end.row {
-                                eprintln!("[FOLD DEBUG] Creating fold range: {:?}..{:?}", start, end);
                                 ranges.push(start..end);
                                 if should_auto_fold {
                                     auto_fold_ranges.push(start..end);
@@ -15699,7 +15690,7 @@ impl Editor {
 
                     // Check if this is the first time processing this buffer
                     // (before we remove the old entries)
-                    let is_first_time = !editor.syntax_fold_ids.contains_key(&buffer_id);
+                    let is_first_time = !editor.auto_folded_buffers.contains(&buffer_id);
 
                     // Remove old syntax folds
                     if let Some(old_ids) = editor.syntax_fold_ids.remove(&buffer_id) {
@@ -15736,11 +15727,11 @@ impl Editor {
                     editor.syntax_fold_ids.insert(buffer_id, ids);
 
                     // Auto-fold the patterns marked with fold.auto (only on first open)
-                    // We infer "first time" by checking if syntax_fold_ids already contained this buffer.
+                    // We infer "first time" by checking if auto_folded_buffers already contains this buffer.
                     // On subsequent reparses, is_first_time will be false, preventing jarring re-folds
                     // when users have manually unfolded functions.
                     if is_first_time && !auto_fold_ranges.is_empty() {
-                        eprintln!("[FOLD DEBUG] Auto-folding {} ranges (first time)", auto_fold_ranges.len());
+                        editor.auto_folded_buffers.insert(buffer_id);
 
                         // Create creases for auto-fold ranges
                         let auto_fold_creases: Vec<_> = auto_fold_ranges
@@ -15767,11 +15758,9 @@ impl Editor {
 
                         // Apply the auto-folds
                         if !auto_fold_creases.is_empty() {
-                            let count = auto_fold_creases.len();
                             editor.display_map.update(cx, |map, cx| {
                                 map.fold(auto_fold_creases, cx);
                             });
-                            eprintln!("[FOLD DEBUG] Applied {} auto-folds", count);
                         }
                     }
                 })
