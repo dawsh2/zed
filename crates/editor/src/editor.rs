@@ -1134,6 +1134,7 @@ pub struct Editor {
     tasks_update_task: Option<Task<()>>,
     syntax_fold_ids: HashMap<BufferId, Vec<CreaseId>>,
     syntax_folds_task: Option<Task<()>>,
+    auto_folded_buffers: HashSet<BufferId>,
     breakpoint_store: Option<Entity<BreakpointStore>>,
     gutter_breakpoint_indicator: (Option<PhantomBreakpointIndicator>, Option<Task<()>>),
     hovered_diff_hunk_row: Option<DisplayRow>,
@@ -2208,6 +2209,7 @@ impl Editor {
             tasks_update_task: None,
             syntax_fold_ids: HashMap::default(),
             syntax_folds_task: None,
+            auto_folded_buffers: HashSet::default(),
             pull_diagnostics_task: Task::ready(()),
             colors: None,
             refresh_colors_task: Task::ready(()),
@@ -2254,6 +2256,14 @@ impl Editor {
                 }));
         }
         editor.tasks_update_task = Some(editor.refresh_runnables(window, cx));
+
+        // Initialize syntax folds for all buffers in the editor
+        // This ensures auto-folds work when splitting windows or opening new panes
+        for buffer_id in editor.buffer().read(cx).all_buffers() {
+            let buffer = buffer_id.read(cx);
+            editor.syntax_folds_task = Some(editor.refresh_syntax_folds(buffer.remote_id(), window, cx));
+        }
+
         editor._subscriptions.extend(project_subscriptions);
 
         editor._subscriptions.push(cx.subscribe_in(
@@ -15619,19 +15629,65 @@ impl Editor {
                     });
 
                     let mut ranges = Vec::new();
+                    let mut auto_fold_ranges = Vec::new();
                     while let Some(mat) = matches.peek() {
+                        let pattern_index = mat.pattern_index;
+
                         for capture in mat.captures {
                             let node = capture.node;
-                            let start = language::Point::from_ts_point(node.start_position());
+                            let mut start = language::Point::from_ts_point(node.start_position());
                             let end = language::Point::from_ts_point(node.end_position());
+                            let mut should_auto_fold = false;
+
+                            // Apply tree-sitter query predicates to adjust fold ranges
+                            // Languages can use predicates in their folds.scm files to customize folding:
+                            //   - fold.offsetStart: Skip N lines from the start (e.g., to keep header visible)
+                            //   - fold.auto: Auto-fold this pattern on file open (e.g., function bodies)
+                            // Future predicates can be added here (e.g., fold.offsetEnd, fold.trim)
+                            if let Some(language) = snapshot.language() {
+                                eprintln!("[FOLD DEBUG] Language: {:?}", language.name());
+                                if let Some(grammar) = language.grammar() {
+                                    eprintln!("[FOLD DEBUG] Grammar found");
+                                    if let Some(query) = grammar.folds_config.as_ref().and_then(|cfg| cfg.query.as_ref()) {
+                                        eprintln!("[FOLD DEBUG] Folds query found, pattern_index: {}", pattern_index);
+                                        let settings = query.property_settings(pattern_index);
+                                        eprintln!("[FOLD DEBUG] Property settings count: {}", settings.len());
+                                        for setting in settings {
+                                            let key_str = setting.key.as_ref();
+                                            eprintln!("[FOLD DEBUG] Setting key: {:?} (len={}, bytes={:?}), value: {:?}", setting.key, key_str.len(), key_str.as_bytes(), setting.value);
+                                            if key_str == "fold.offsetStart" || key_str == "offsetStart" {
+                                                eprintln!("[FOLD DEBUG] Matched fold.offsetStart!");
+                                                if let Some(offset) = setting.value.as_ref().and_then(|v| v.parse::<u32>().ok()) {
+                                                    eprintln!("[FOLD DEBUG] Applying offset: {} (start was {:?})", offset, start);
+                                                    start.row += offset;
+                                                    start.column = 0;
+                                                    eprintln!("[FOLD DEBUG] Start is now: {:?}", start);
+                                                }
+                                            } else if key_str == "fold.auto" || key_str == "auto" {
+                                                eprintln!("[FOLD DEBUG] Matched fold.auto!");
+                                                if setting.value.as_ref().map_or(false, |v| v.as_ref() == "true") {
+                                                    eprintln!("[FOLD DEBUG] Auto-fold enabled for this pattern");
+                                                    should_auto_fold = true;
+                                                }
+                                            }
+                                            // Additional predicates can be handled here
+                                        }
+                                    }
+                                }
+                            }
+
                             // Only include multi-line folds
                             if start.row < end.row {
+                                eprintln!("[FOLD DEBUG] Creating fold range: {:?}..{:?}", start, end);
                                 ranges.push(start..end);
+                                if should_auto_fold {
+                                    auto_fold_ranges.push(start..end);
+                                }
                             }
                         }
                         matches.advance();
                     }
-                    ranges
+                    (ranges, auto_fold_ranges)
                 })
                 .await;
 
@@ -15647,6 +15703,8 @@ impl Editor {
                     if let Some(old_ids) = editor.syntax_fold_ids.remove(&buffer_id) {
                         editor.remove_creases(old_ids, cx);
                     }
+
+                    let (fold_ranges, auto_fold_ranges) = fold_ranges;
 
                     // Create new creases
                     let creases: Vec<_> = fold_ranges
@@ -15674,6 +15732,52 @@ impl Editor {
                     // Insert and track IDs
                     let ids = editor.insert_creases(creases, cx);
                     editor.syntax_fold_ids.insert(buffer_id, ids);
+
+                    // Auto-fold the patterns marked with fold.auto (only on first open)
+                    // Check if this buffer has already been auto-folded to prevent re-folding
+                    // on subsequent reparses (which would be jarring for users who manually unfolded)
+                    let should_auto_fold = !editor.auto_folded_buffers.contains(&buffer_id);
+
+                    if should_auto_fold && !auto_fold_ranges.is_empty() {
+                        eprintln!("[FOLD DEBUG] Auto-folding {} ranges (first time)", auto_fold_ranges.len());
+
+                        // Create creases for auto-fold ranges
+                        let auto_fold_creases: Vec<_> = auto_fold_ranges
+                            .into_iter()
+                            .filter_map(|range| {
+                                let start = buffer_snapshot.anchor_before(range.start);
+                                let end = buffer_snapshot.anchor_after(range.end);
+
+                                // Convert buffer anchors to multibuffer anchors
+                                let excerpts: Vec<_> = snapshot.excerpts().collect();
+                                for (excerpt_id, excerpt_snapshot, _) in excerpts {
+                                    if excerpt_snapshot.remote_id() == buffer_snapshot.remote_id() {
+                                        let mb_start = snapshot.anchor_in_excerpt(excerpt_id, start)?;
+                                        let mb_end = snapshot.anchor_in_excerpt(excerpt_id, end)?;
+                                        return Some(Crease::simple(
+                                            mb_start..mb_end,
+                                            placeholder.clone(),
+                                        ));
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+
+                        // Apply the auto-folds
+                        if !auto_fold_creases.is_empty() {
+                            let count = auto_fold_creases.len();
+                            editor.display_map.update(cx, |map, cx| {
+                                map.fold(auto_fold_creases, cx);
+                            });
+                            eprintln!("[FOLD DEBUG] Applied {} auto-folds", count);
+
+                            // Mark this buffer as auto-folded so we don't auto-fold again on reparse
+                            editor.auto_folded_buffers.insert(buffer_id);
+                        }
+                    } else if !should_auto_fold {
+                        eprintln!("[FOLD DEBUG] Skipping auto-fold (buffer already auto-folded)");
+                    }
                 })
                 .ok();
         })
@@ -21070,8 +21174,10 @@ impl Editor {
                 predecessor,
                 excerpts,
             } => {
+                eprintln!("[FOLD DEBUG] ExcerptsAdded event fired");
                 self.tasks_update_task = Some(self.refresh_runnables(window, cx));
                 let buffer_id = buffer.read(cx).remote_id();
+                eprintln!("[FOLD DEBUG] Calling refresh_syntax_folds for buffer_id: {:?}", buffer_id);
                 if self.buffer.read(cx).diff_for(buffer_id).is_none()
                     && let Some(project) = &self.project
                 {
@@ -21086,6 +21192,7 @@ impl Editor {
                 }
                 self.update_lsp_data(Some(buffer_id), window, cx);
                 self.refresh_inlay_hints(InlayHintRefreshReason::NewLinesShown, cx);
+                self.syntax_folds_task = Some(self.refresh_syntax_folds(buffer_id, window, cx));
                 cx.emit(EditorEvent::ExcerptsAdded {
                     buffer: buffer.clone(),
                     predecessor: *predecessor,

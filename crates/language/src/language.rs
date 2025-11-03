@@ -1569,7 +1569,10 @@ impl Language {
     }
 
     pub fn with_folds_query(mut self, source: &str) -> Result<Self> {
+        log::info!("[FOLDS] Loading folds query for language: {:?}", self.config.name);
+        log::info!("[FOLDS] Query source length: {} bytes", source.len());
         let query = Query::new(&self.expect_grammar()?.ts_language, source)?;
+        log::info!("[FOLDS] Query loaded successfully with {} patterns", query.pattern_count());
         self.grammar_mut()?.folds_config = Some(FoldsConfig { query: Some(query) });
         Ok(self)
     }
