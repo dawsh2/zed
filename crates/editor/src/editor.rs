@@ -1134,7 +1134,6 @@ pub struct Editor {
     tasks_update_task: Option<Task<()>>,
     syntax_fold_ids: HashMap<BufferId, Vec<CreaseId>>,
     syntax_folds_task: Option<Task<()>>,
-    auto_folded_buffers: HashSet<BufferId>,
     breakpoint_store: Option<Entity<BreakpointStore>>,
     gutter_breakpoint_indicator: (Option<PhantomBreakpointIndicator>, Option<Task<()>>),
     hovered_diff_hunk_row: Option<DisplayRow>,
@@ -2209,7 +2208,6 @@ impl Editor {
             tasks_update_task: None,
             syntax_fold_ids: HashMap::default(),
             syntax_folds_task: None,
-            auto_folded_buffers: HashSet::default(),
             pull_diagnostics_task: Task::ready(()),
             colors: None,
             refresh_colors_task: Task::ready(()),
@@ -15699,6 +15697,10 @@ impl Editor {
                     let placeholder = editor.display_map.read(cx).fold_placeholder.clone();
                     let buffer_snapshot = buffer.read(cx).snapshot();
 
+                    // Check if this is the first time processing this buffer
+                    // (before we remove the old entries)
+                    let is_first_time = !editor.syntax_fold_ids.contains_key(&buffer_id);
+
                     // Remove old syntax folds
                     if let Some(old_ids) = editor.syntax_fold_ids.remove(&buffer_id) {
                         editor.remove_creases(old_ids, cx);
@@ -15734,11 +15736,10 @@ impl Editor {
                     editor.syntax_fold_ids.insert(buffer_id, ids);
 
                     // Auto-fold the patterns marked with fold.auto (only on first open)
-                    // Check if this buffer has already been auto-folded to prevent re-folding
-                    // on subsequent reparses (which would be jarring for users who manually unfolded)
-                    let should_auto_fold = !editor.auto_folded_buffers.contains(&buffer_id);
-
-                    if should_auto_fold && !auto_fold_ranges.is_empty() {
+                    // We infer "first time" by checking if syntax_fold_ids already contained this buffer.
+                    // On subsequent reparses, is_first_time will be false, preventing jarring re-folds
+                    // when users have manually unfolded functions.
+                    if is_first_time && !auto_fold_ranges.is_empty() {
                         eprintln!("[FOLD DEBUG] Auto-folding {} ranges (first time)", auto_fold_ranges.len());
 
                         // Create creases for auto-fold ranges
@@ -15771,12 +15772,7 @@ impl Editor {
                                 map.fold(auto_fold_creases, cx);
                             });
                             eprintln!("[FOLD DEBUG] Applied {} auto-folds", count);
-
-                            // Mark this buffer as auto-folded so we don't auto-fold again on reparse
-                            editor.auto_folded_buffers.insert(buffer_id);
                         }
-                    } else if !should_auto_fold {
-                        eprintln!("[FOLD DEBUG] Skipping auto-fold (buffer already auto-folded)");
                     }
                 })
                 .ok();
